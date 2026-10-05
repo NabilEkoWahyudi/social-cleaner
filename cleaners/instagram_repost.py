@@ -1,13 +1,16 @@
 """
 cleaners/instagram_repost.py — Instagram Repost cleaner
 
-Confirmed working flow (verified via test scripts and screenshots):
-  1. Navigate to /accounts/edit/ with networkidle to ensure page fully loaded
-  2. Extract username from sidebar profile link (href="/roin_xn/" pattern)
-  3. Go directly to https://www.instagram.com/{username}/reposts/
-  4. Click each repost thumbnail
-  5. Click svg[aria-label="Repost"] button (div[role="button"]) in the opened post
-  6. A dialog appears: "You reposted this. Delete" — click the "Delete" link
+Confirmed working flow (tested headless + verified via screenshots):
+  1. /accounts/edit/ with networkidle → extract username from sidebar link
+  2. Navigate to https://www.instagram.com/{username}/reposts/
+  3. Collect post hrefs from reposts grid
+  4. For each href: CLICK the thumbnail element (NOT page.goto!) so Instagram
+     opens the post as a dialog overlay (same as manual click by user).
+     → In this dialog context, svg[aria-label='Posting ulang'] parentRole=button IS present.
+  5. Click 'Posting ulang' button
+  6. Click 'Hapus' link in the "Kamu memposting ulang ini. Hapus" dialog
+  7. Press Escape to close dialog → back to reposts page, repeat
 """
 import time
 from typing import List, Optional
@@ -17,8 +20,7 @@ from .base import BaseCleaner
 from config import PLATFORM_URLS
 from utils import parse_date
 
-
-# Words that are NOT usernames — filter them out when scanning sidebar links
+# Words that are NOT usernames — filter when scanning sidebar links
 _RESERVED = {
     "reels", "explore", "direct", "stories", "accounts",
     "legal", "language", "settings", "popular", "web",
@@ -26,62 +28,70 @@ _RESERVED = {
     "about", "help", "privacy", "terms", "locations",
     "meta_verified", "ads", "api", "press", "jobs",
     "blog", "lite", "supervision", "accessibility",
-    "popular", "directory", "hashtag", "shared",
-    "inbox", "messages",
+    "directory", "hashtag", "shared", "inbox", "messages",
 }
+
+# Indonesian + English aria-labels for the ACTIVE repost button in the action bar
+# Confirmed from headless test: 'Posting ulang' with parentRole=button
+_REPOST_LABELS = [
+    "Posting ulang",    # Indonesian — confirmed parentRole=button ✅
+    "Postingan ulang",  # Indonesian — alternate
+    "Repost",           # English
+]
+
+# Text in the "undo repost" confirm dialog
+_DELETE_TEXTS = [
+    "Hapus",    # Indonesian
+    "Delete",   # English
+]
 
 
 class InstagramRepostCleaner(BaseCleaner):
     platform     = "instagram"
     content_type = "repost"
 
+    _username:    Optional[str] = None
+    _reposts_url: Optional[str] = None
+
     # ── Navigate ──────────────────────────────────────────────────────────────
 
     def navigate_to_content(self, page: Page) -> bool:
         base = PLATFORM_URLS["instagram"]["base"]
 
-        # Step 1 — Load /accounts/edit/ with full networkidle so sidebar loads
-        self.log("[INFO] Loading Instagram account page to detect username…")
+        self.log("[INFO] Loading /accounts/edit/ to detect username…")
         try:
             page.goto(f"{base}/accounts/edit/", wait_until="networkidle", timeout=25000)
         except Exception:
-            try:
-                page.goto(f"{base}/accounts/edit/", wait_until="domcontentloaded")
-                time.sleep(3)
-            except Exception:
-                pass
+            page.goto(f"{base}/accounts/edit/", wait_until="domcontentloaded")
+            time.sleep(4)
 
         if not self._check_logged_in(page):
             return False
 
-        # Step 2 — Extract the logged-in username from the page
-        username = self._get_username_from_page(page)
+        username = self._get_username(page)
         if not username:
             self.log("[ERROR] Could not detect your Instagram username.")
             self.log("[ERROR] Session may be expired — please log in again.")
             self._screenshot(page, "ig_no_username")
             return False
 
+        self._username    = username
+        reposts_url       = f"{base}/{username}/reposts/"
+        self._reposts_url = reposts_url
         self.log(f"[INFO] Logged in as @{username}")
-
-        # Step 3 — Navigate directly to the reposts URL for that username
-        reposts_url = f"{base}/{username}/reposts/"
         self.log(f"[INFO] Navigating to reposts → {reposts_url}")
+
         try:
             page.goto(reposts_url, wait_until="networkidle", timeout=25000)
         except Exception:
-            try:
-                page.goto(reposts_url, wait_until="domcontentloaded")
-                time.sleep(3)
-            except Exception:
-                pass
+            page.goto(reposts_url, wait_until="domcontentloaded")
+            time.sleep(3)
 
         current = page.url
         self.log(f"[INFO] Current URL: {current}")
 
-        # Validate we're on the reposts page
         if f"/{username}/reposts" not in current:
-            self.log("[WARN] Not on reposts page — redirected. Trying tab click…")
+            self.log("[WARN] Not on reposts page — trying tab click…")
             self._screenshot(page, "ig_reposts_redirect")
             if not self._click_reposts_tab(page):
                 self.log("[ERROR] Could not reach reposts page.")
@@ -92,55 +102,36 @@ class InstagramRepostCleaner(BaseCleaner):
 
     # ── Username detection ────────────────────────────────────────────────────
 
-    def _get_username_from_page(self, page: Page) -> Optional[str]:
+    def _get_username(self, page: Page) -> Optional[str]:
         """
-        Extracts the logged-in username from the Instagram /accounts/edit/ page.
-        This page always has a sidebar link href="/{username}/" which is the
-        profile link — the ONLY single-segment non-reserved href on the page.
+        Find the logged-in user's username from the /accounts/edit/ sidebar.
+        Looks for the only single-segment href that is not a reserved word.
+        Regex filters out '#', digits-only, and any non-alphanumeric slug.
         """
         result = page.evaluate("""(reserved) => {
-            // Scan all anchor hrefs on the page
             const anchors = Array.from(document.querySelectorAll('a[href]'));
             for (const a of anchors) {
                 const href = (a.getAttribute('href') || '').trim();
-                // Must be exactly /{something}/ — one segment only
                 if (!href.startsWith('/') || !href.endsWith('/')) continue;
                 if (href === '/') continue;
                 const parts = href.split('/').filter(Boolean);
                 if (parts.length !== 1) continue;
                 const slug = parts[0];
-                // Must not be a reserved word, must not contain special chars
-                // (username can only have letters, numbers, . and _)
                 if (reserved.includes(slug)) continue;
-                if (!/^[a-z0-9._]+$/i.test(slug)) continue;
+                // Instagram usernames: letters, numbers, underscore, dot only
+                if (!/^[a-z0-9][a-z0-9._]*$/i.test(slug)) continue;
                 return slug;
             }
             return null;
         }""", list(_RESERVED))
-
         if result:
-            self.log(f"[INFO] Username detected from sidebar: {result}")
-            return result
-
-        # Fallback: check the page title (format: "Edit profile • Instagram")
-        # The profile page title is "username • Instagram"
-        try:
-            # Navigate to profile redirect — IG redirects / to home but
-            # /accounts/edit/ has a link we can click
-            title = page.title()
-            # Title on accounts/edit page might say "Edit profile • Instagram"
-            # But the profile picture link in the sidebar has href="/{username}/"
-            self.log(f"[DEBUG] Page title: {title}")
-        except Exception:
-            pass
-
-        return None
+            self.log(f"[INFO] Username detected: {result}")
+        return result
 
     def _click_reposts_tab(self, page: Page) -> bool:
         for sel in [
             "a[href$='/reposts/']",
             "a[href*='/reposts']",
-            "[role='tab']:text-matches('repost', 'i')",
             "span:text-matches('repost', 'i')",
             "span:text-matches('Dibagikan', 'i')",
         ]:
@@ -157,9 +148,21 @@ class InstagramRepostCleaner(BaseCleaner):
     # ── Item scanning ─────────────────────────────────────────────────────────
 
     def iter_items(self, page: Page) -> List[dict]:
-        """Collect all repost thumbnail links on the reposts page."""
-        items = []
+        """
+        Collect post hrefs from the reposts grid.
+        We store hrefs only (no element refs) — elements are looked up fresh
+        at click time to avoid stale-element errors after DOM changes.
+        """
         seen  = set()
+        items = []
+
+        # Must be on reposts page
+        if self._reposts_url and self._reposts_url not in page.url:
+            try:
+                page.goto(self._reposts_url, wait_until="domcontentloaded", timeout=15000)
+                time.sleep(2)
+            except Exception:
+                pass
 
         for sel in [
             "article a[href*='/p/']",
@@ -174,143 +177,161 @@ class InstagramRepostCleaner(BaseCleaner):
                     href = el.get_attribute("href") or ""
                     if href and href not in seen and el.is_visible():
                         seen.add(href)
-                        items.append({"element": el, "href": href, "index": len(items)})
+                        items.append({"href": href, "index": len(items)})
             except Exception:
                 continue
 
         return items
 
-    # ── Read metadata ─────────────────────────────────────────────────────────
+    # ── Read metadata (click thumbnail → open dialog) ─────────────────────────
 
     def read_item_metadata(self, page: Page, item: dict) -> dict:
+        """
+        CLICK the thumbnail element by href so Instagram opens the post as a
+        dialog overlay (the same as clicking manually). This is critical:
+        page.goto() loads a standalone post page with a DIFFERENT DOM structure
+        where 'Posting ulang' may not exist; click-navigation opens the dialog
+        where the active repost button IS present.
+        """
+        href = item.get("href", "")
+        if not href:
+            return item
+
+        # Make sure we're on reposts page before clicking
+        if self._reposts_url and self._reposts_url not in page.url:
+            try:
+                page.goto(self._reposts_url, wait_until="domcontentloaded", timeout=15000)
+                time.sleep(2)
+            except Exception:
+                pass
+
+        # Find element fresh by href and click it
         try:
-            item["element"].click(timeout=5000)
-            time.sleep(2.5)
-
-            dialog = page.locator("div[role='dialog']").first
-            content   = ""
-            date_text = ""
-
-            if dialog.count() > 0 and dialog.is_visible():
-                content = dialog.inner_text()
-                time_el = dialog.locator("time[datetime]").first
-                if time_el.count() > 0:
-                    date_text = time_el.get_attribute("datetime") or ""
-            else:
-                content = page.locator("main").inner_text() if page.locator("main").count() > 0 else ""
-                time_el = page.locator("time[datetime]").first
-                if time_el.count() > 0:
-                    date_text = time_el.get_attribute("datetime") or ""
-
-            item["caption"] = content
-            item["date"]    = parse_date(date_text)
-        except Exception:
+            for sel in [
+                f"a[href='{href}']",
+                f"article a[href='{href}']",
+            ]:
+                el = page.locator(sel).first
+                if el.count() > 0 and el.is_visible(timeout=1000):
+                    self.log(f"[INFO] Opening post dialog for {href}")
+                    el.click(timeout=5000)
+                    time.sleep(3)   # Wait for dialog/page to load
+                    break
+        except Exception as e:
+            self.log(f"[WARN] Could not click thumbnail for {href}: {e}")
             item.setdefault("caption", "")
             item.setdefault("date", None)
+            return item
+
+        # Read caption + date from whatever is now open
+        content   = ""
+        date_text = ""
+        try:
+            for cap_sel in ["div[role='dialog']", "article", "main"]:
+                el = page.locator(cap_sel).first
+                if el.count() > 0 and el.is_visible(timeout=1000):
+                    content = el.inner_text()
+                    break
+            time_el = page.locator("time[datetime]").first
+            if time_el.count() > 0:
+                date_text = time_el.get_attribute("datetime") or ""
+        except Exception:
+            pass
+
+        item["caption"] = content
+        item["date"]    = parse_date(date_text)
         return item
 
     # ── Delete (unrepost) ─────────────────────────────────────────────────────
 
     def delete_item(self, page: Page, item: dict) -> bool:
         """
-        Confirmed working flow from scratch_after_repost_click.png:
-          1. Click svg[aria-label='Repost'] (the repost icon in the action bar)
-          2. A dialog appears: "You reposted this. Delete"
-          3. Click the "Delete" link/button in that dialog
+        Post dialog is already open (from read_item_metadata).
+        Click the 'Posting ulang' active repost button → click 'Hapus'.
         """
-        self.log("[INFO] Looking for Repost icon in the action bar…")
+        self.log("[INFO] Looking for 'Posting ulang' repost icon…")
 
-        # Click the repost SVG icon (the active repost state icon in action bar)
-        # Confirmed selector from test: div[role='button']:has(svg[aria-label='Repost'])
+        # Take screenshot right before attempting — shows exactly what bot sees
+        self._screenshot(page, f"ig_before_repost_click_{item.get('index', 0)}")
+
         clicked = False
-        for sel in [
-            "div[role='button']:has(svg[aria-label='Repost'])",
-            "div[role='button']:has(svg[aria-label='Repost'][aria-label])",
-            "span:has(svg[aria-label='Repost'])",
-            "svg[aria-label='Repost']",
-            # Indonesian UI fallback
-            "div[role='button']:has(svg[aria-label='Bagikan ulang'])",
-            "svg[aria-label='Bagikan ulang']",
-            "div[role='button']:has(svg[aria-label='Repost'])",
-        ]:
-            try:
-                el = page.locator(sel).first
-                if el.count() > 0 and el.is_visible(timeout=1500):
-                    self.log(f"[INFO] Clicking repost icon ({sel})")
-                    el.click(timeout=3000)
-                    time.sleep(1.5)
-                    clicked = True
-                    break
-            except Exception:
-                continue
+        for label in _REPOST_LABELS:
+            for sel in [
+                f"div[role='button']:has(svg[aria-label='{label}'])",
+                f"span:has(svg[aria-label='{label}'])",
+                f"svg[aria-label='{label}']",
+            ]:
+                try:
+                    el = page.locator(sel).first
+                    if el.count() > 0 and el.is_visible(timeout=2000):
+                        self.log(f"[INFO] Clicking repost icon (aria-label='{label}')")
+                        el.click(timeout=5000)
+                        time.sleep(1.5)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+            if clicked:
+                break
 
         if not clicked:
+            # Log ALL visible SVG labels for diagnosis
+            try:
+                labels = page.evaluate("""() => {
+                    return Array.from(document.querySelectorAll('svg[aria-label]'))
+                        .map(s => s.getAttribute('aria-label'));
+                }""")
+                unique = list(dict.fromkeys(labels))
+                self.log(f"[DEBUG] SVG labels on page: {unique}")
+            except Exception:
+                pass
             self.log("[WARN] Repost icon not found.")
             self._screenshot(page, f"ig_no_repost_icon_{item.get('index', 0)}")
             return False
 
-        # After clicking the repost icon, a dialog appears:
-        # "You reposted this. Delete"  ← need to click Delete
-        return self._click_delete_in_dialog(page)
+        # Click Hapus/Delete in the "Kamu memposting ulang ini. Hapus" dialog
+        return self._click_confirm(page, item)
 
-    def _click_delete_in_dialog(self, page: Page) -> bool:
-        """
-        After clicking the repost icon, IG shows a small dialog with:
-        "You reposted this. Delete"
-        We need to click "Delete" (or its Indonesian equivalent "Hapus").
-        """
-        # Wait a moment for dialog to appear
+    def _click_confirm(self, page: Page, item: dict) -> bool:
         time.sleep(1)
+        for text in _DELETE_TEXTS:
+            for sel in [
+                f"a:has-text('{text}')",
+                f"button:has-text('{text}')",
+                f"div[role='button']:has-text('{text}')",
+                f"span:has-text('{text}')",
+            ]:
+                try:
+                    el = page.locator(sel).first
+                    if el.count() > 0 and el.is_visible(timeout=1500):
+                        self.log(f"[OK] Clicking confirm '{text}'")
+                        el.click(timeout=5000)
+                        time.sleep(1.5)
+                        return True
+                except Exception:
+                    continue
 
-        # The "Delete" text appears as a link or button inside the repost dialog
-        for sel in [
-            # English
-            "a:has-text('Delete')",
-            "button:has-text('Delete')",
-            "span:has-text('Delete')",
-            "div:has-text('Delete'):not(:has(*))",   # leaf div with just "Delete" text
-            # Indonesian
-            "a:has-text('Hapus')",
-            "button:has-text('Hapus')",
-            "span:has-text('Hapus')",
-            # Generic
-            "*[role='button']:has-text('Delete')",
-            "*[role='button']:has-text('Hapus')",
-        ]:
-            try:
-                el = page.locator(sel).first
-                if el.count() > 0 and el.is_visible(timeout=1000):
-                    self.log(f"[OK] Found 'Delete' button — clicking ({sel})")
-                    el.click(timeout=3000)
-                    time.sleep(1.2)
-                    return True
-            except Exception:
-                continue
-
-        # Screenshot to see what dialog appeared
-        self._screenshot(page, f"ig_delete_dialog_fail_{int(time.time())}")
-        self.log("[WARN] 'Delete' button not found in dialog.")
+        self._screenshot(page, f"ig_confirm_fail_{item.get('index', 0)}")
+        self.log("[WARN] Hapus/Delete confirm not found.")
         return False
 
-    # ── Close dialog ──────────────────────────────────────────────────────────
+    # ── Close dialog → back to reposts page ──────────────────────────────────
 
     def close_item(self, page: Page):
-        for sel in [
-            "div[role='dialog'] svg[aria-label='Close']",
-            "div[role='dialog'] svg[aria-label='Tutup']",
-            "button[aria-label='Close']",
-            "svg[aria-label='Close']",
-        ]:
-            try:
-                el = page.locator(sel).first
-                if el.count() > 0 and el.is_visible(timeout=800):
-                    el.click()
-                    time.sleep(1)
-                    return
-            except Exception:
-                continue
+        """
+        Close the dialog by pressing Escape.
+        Instagram's modal routing returns to the reposts URL automatically.
+        """
         try:
             page.keyboard.press("Escape")
-            time.sleep(1)
+            time.sleep(1.5)
         except Exception:
             pass
+
+        # Ensure we're back on the reposts page
+        if self._reposts_url and self._reposts_url not in page.url:
+            try:
+                page.goto(self._reposts_url, wait_until="domcontentloaded", timeout=15000)
+                time.sleep(2)
+            except Exception:
+                pass
