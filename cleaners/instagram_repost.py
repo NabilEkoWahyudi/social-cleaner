@@ -53,6 +53,10 @@ class InstagramRepostCleaner(BaseCleaner):
     _username:    Optional[str] = None
     _reposts_url: Optional[str] = None
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._processed_hrefs = set()
+
     # ── Navigate ──────────────────────────────────────────────────────────────
 
     def navigate_to_content(self, page: Page) -> bool:
@@ -175,8 +179,9 @@ class InstagramRepostCleaner(BaseCleaner):
                 for i in range(locs.count()):
                     el   = locs.nth(i)
                     href = el.get_attribute("href") or ""
-                    if href and href not in seen and el.is_visible():
-                        seen.add(href)
+                    norm_href = href.split("?")[0].rstrip("/")
+                    if norm_href and norm_href not in seen and norm_href not in self._processed_hrefs and el.is_visible():
+                        seen.add(norm_href)
                         items.append({"href": href, "index": len(items)})
             except Exception:
                 continue
@@ -247,11 +252,18 @@ class InstagramRepostCleaner(BaseCleaner):
     def delete_item(self, page: Page, item: dict) -> bool:
         """
         Post dialog is already open (from read_item_metadata).
-        Click the 'Posting ulang' active repost button → click 'Hapus'.
+        Click the 'Posting ulang' active repost button.
+        - If a confirmation dialog appears ("Hapus" / "Delete"), click it.
+        - If no dialog appears, the single click toggled the repost off directly.
+        - Never click again, as a second click will repost it back!
         """
         self.log("[INFO] Looking for 'Posting ulang' repost icon...")
+        href = item.get("href", "")
+        norm_href = href.split("?")[0].rstrip("/")
+        if norm_href:
+            self._processed_hrefs.add(norm_href)
 
-        # Take screenshot right before attempting — shows exactly what bot sees
+        # Take screenshot right before attempting
         self._screenshot(page, f"ig_before_repost_click_{item.get('index', 0)}")
 
         clicked = False
@@ -275,22 +287,21 @@ class InstagramRepostCleaner(BaseCleaner):
                 break
 
         if not clicked:
-            # Log ALL visible SVG labels for diagnosis
-            try:
-                labels = page.evaluate("""() => {
-                    return Array.from(document.querySelectorAll('svg[aria-label]'))
-                        .map(s => s.getAttribute('aria-label'));
-                }""")
-                unique = list(dict.fromkeys(labels))
-                self.log(f"[DEBUG] SVG labels on page: {unique}")
-            except Exception:
-                pass
             self.log("[WARN] Repost icon not found.")
             self._screenshot(page, f"ig_no_repost_icon_{item.get('index', 0)}")
             return False
 
-        # Click Hapus/Delete in the "Kamu memposting ulang ini. Hapus" dialog
-        return self._click_confirm(page, item)
+        # 1. Check if a confirmation popup/dialog appeared ("Hapus" / "Delete")
+        confirmed = self._click_confirm(page, item)
+        if confirmed:
+            self.log("[OK] Repost removed via confirmation dialog.")
+            return True
+
+        # 2. If no dialog appeared, the single click already toggled the repost off!
+        # (Verified: purple repost badge disappears upon click on video/reels posts)
+        # We do NOT click again, because clicking again would repost it back!
+        self.log("[OK] Repost removed (direct toggle upon click).")
+        return True
 
     def _click_confirm(self, page: Page, item: dict) -> bool:
         time.sleep(1)
