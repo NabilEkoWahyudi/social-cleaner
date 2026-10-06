@@ -58,7 +58,7 @@ class InstagramRepostCleaner(BaseCleaner):
     def navigate_to_content(self, page: Page) -> bool:
         base = PLATFORM_URLS["instagram"]["base"]
 
-        self.log("[INFO] Loading /accounts/edit/ to detect username…")
+        self.log("[INFO] Loading /accounts/edit/ to detect username...")
         try:
             page.goto(f"{base}/accounts/edit/", wait_until="networkidle", timeout=25000)
         except Exception:
@@ -71,7 +71,7 @@ class InstagramRepostCleaner(BaseCleaner):
         username = self._get_username(page)
         if not username:
             self.log("[ERROR] Could not detect your Instagram username.")
-            self.log("[ERROR] Session may be expired — please log in again.")
+            self.log("[ERROR] Session may be expired - please log in again.")
             self._screenshot(page, "ig_no_username")
             return False
 
@@ -79,7 +79,7 @@ class InstagramRepostCleaner(BaseCleaner):
         reposts_url       = f"{base}/{username}/reposts/"
         self._reposts_url = reposts_url
         self.log(f"[INFO] Logged in as @{username}")
-        self.log(f"[INFO] Navigating to reposts → {reposts_url}")
+        self.log(f"[INFO] Navigating to reposts -> {reposts_url}")
 
         try:
             page.goto(reposts_url, wait_until="networkidle", timeout=25000)
@@ -91,7 +91,7 @@ class InstagramRepostCleaner(BaseCleaner):
         self.log(f"[INFO] Current URL: {current}")
 
         if f"/{username}/reposts" not in current:
-            self.log("[WARN] Not on reposts page — trying tab click…")
+            self.log("[WARN] Not on reposts page - trying tab click...")
             self._screenshot(page, "ig_reposts_redirect")
             if not self._click_reposts_tab(page):
                 self.log("[ERROR] Could not reach reposts page.")
@@ -249,7 +249,7 @@ class InstagramRepostCleaner(BaseCleaner):
         Post dialog is already open (from read_item_metadata).
         Click the 'Posting ulang' active repost button → click 'Hapus'.
         """
-        self.log("[INFO] Looking for 'Posting ulang' repost icon…")
+        self.log("[INFO] Looking for 'Posting ulang' repost icon...")
 
         # Take screenshot right before attempting — shows exactly what bot sees
         self._screenshot(page, f"ig_before_repost_click_{item.get('index', 0)}")
@@ -296,10 +296,14 @@ class InstagramRepostCleaner(BaseCleaner):
         time.sleep(1)
         for text in _DELETE_TEXTS:
             for sel in [
-                f"a:has-text('{text}')",
+                f"div[role='dialog'] *[role='button']:has-text('{text}')",
+                f"div[role='dialog'] span:has-text('{text}')",
+                f"div[role='dialog'] a:has-text('{text}')",
+                f"div[role='dialog'] button:has-text('{text}')",
+                f"*[role='button']:has-text('{text}')",
                 f"button:has-text('{text}')",
-                f"div[role='button']:has-text('{text}')",
                 f"span:has-text('{text}')",
+                f"a:has-text('{text}')",
             ]:
                 try:
                     el = page.locator(sel).first
@@ -319,12 +323,27 @@ class InstagramRepostCleaner(BaseCleaner):
 
     def close_item(self, page: Page):
         """
-        Close the dialog by pressing Escape.
-        Instagram's modal routing returns to the reposts URL automatically.
+        Close the post dialog and return to the reposts grid.
+        Tries closing with the 'Tutup'/'Close' SVG button first, then Escape.
         """
+        for sel in [
+            "div[role='dialog'] svg[aria-label='Tutup']",
+            "div[role='dialog'] svg[aria-label='Close']",
+            "svg[aria-label='Tutup']",
+            "svg[aria-label='Close']",
+        ]:
+            try:
+                el = page.locator(sel).first
+                if el.count() > 0 and el.is_visible(timeout=800):
+                    el.click(timeout=2000)
+                    time.sleep(1)
+                    break
+            except Exception:
+                pass
+
         try:
             page.keyboard.press("Escape")
-            time.sleep(1.5)
+            time.sleep(1)
         except Exception:
             pass
 

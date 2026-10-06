@@ -151,7 +151,7 @@ class BaseCleaner:
                         on_progress(0, "DONE")
                     return 0
 
-                progress(f"[INFO] ✅ Navigation OK — URL: {page.url}")
+                progress(f"[INFO] [OK] Navigation OK - URL: {page.url}")
 
                 # ── Main deletion loop ───────────────────────────────────────
                 scroll_rounds = 0
@@ -173,7 +173,7 @@ class BaseCleaner:
 
                     stale_rounds  = 0
                     processed_any = False
-                    progress(f"[INFO] Found {len(items)} item(s) — checking filters…")
+                    progress(f"[INFO] Found {len(items)} item(s) - checking filters...")
 
                     for item in items:
                         if self.should_stop():
@@ -208,7 +208,7 @@ class BaseCleaner:
                                     reason = f"Posted before {before_date.strftime('%Y-%m-%d') if before_date else '?'}"
                                 elif not post_date:
                                     # Can't read date → skip safely
-                                    progress("[SKIP] Could not read post date — skipping item.")
+                                    progress("[SKIP] Could not read post date - skipping item.")
 
                             elif mode == "keyword_and_date":
                                 matched, kw = match_keywords(text, kw_list)
@@ -220,25 +220,25 @@ class BaseCleaner:
                             # ── Act ───────────────────────────────────────────
                             if should_delete:
                                 preview = (text[:60].replace("\n", " ") or "(no text)")
-                                progress(f"[DEL] {reason} → {preview}…")
+                                progress(f"[DEL] {reason} -> {preview}...")
                                 # Screenshot before delete so user can see what browser sees
                                 self._screenshot(page, f"{self.platform}_before_delete_{deleted}")
                                 ok = self.delete_item(page, item)
                                 if ok:
                                     deleted += 1
                                     processed_any = True
-                                    progress(f"[OK] ✅ Deleted! Total so far: {deleted}")
+                                    progress(f"[OK] Deleted! Total so far: {deleted}")
                                     sleep_random(MIN_ACTION_DELAY, MAX_ACTION_DELAY, log_fn=self.log)
 
                                     if deleted % BATCH_SIZE == 0:
-                                        progress(f"[COOLDOWN] {deleted} deleted — anti-spam rest {BATCH_COOLDOWN}s…")
+                                        progress(f"[COOLDOWN] {deleted} deleted - anti-spam rest {BATCH_COOLDOWN}s...")
                                         sleep_with_progress(BATCH_COOLDOWN, "Cooldown", log_fn=self.log)
                                 else:
-                                    progress("[WARN] Delete button not found for this item — skipping.")
+                                    progress("[WARN] Delete button not found for this item - skipping.")
                                     self._screenshot(page, f"{self.platform}_delete_fail_{deleted}")
                             else:
                                 preview = text[:40] or "(no text)"
-                                progress(f"[SKIP] Filter not matched → {preview!r}")
+                                progress(f"[SKIP] Filter not matched -> {preview!r}")
 
                             self.close_item(page)
 
@@ -266,7 +266,7 @@ class BaseCleaner:
             finally:
                 handle.close()
 
-        self.log(f"[DONE] ══ {self.platform.upper()} {self.content_type}: {deleted} deleted ══")
+        self.log(f"[DONE] == {self.platform.upper()} {self.content_type}: {deleted} deleted ==")
         if on_progress:
             on_progress(deleted, "DONE")
         return deleted

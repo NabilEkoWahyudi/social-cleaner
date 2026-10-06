@@ -4,6 +4,15 @@ Run: python main.py
 """
 import sys
 
+# Ensure UTF-8 console output on Windows to prevent UnicodeEncodeError
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
 def main():
     try:
         from app import main as run_app
