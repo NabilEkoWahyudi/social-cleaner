@@ -217,11 +217,16 @@ class InstagramRepostCleaner(BaseCleaner):
                 f"article a[href='{href}']",
             ]:
                 el = page.locator(sel).first
-                if el.count() > 0 and el.is_visible(timeout=1000):
-                    self.log(f"[INFO] Opening post dialog for {href}")
-                    el.click(timeout=5000)
-                    time.sleep(3)   # Wait for dialog/page to load
-                    break
+                if el.count() > 0:
+                    try:
+                        el.scroll_into_view_if_needed(timeout=2000)
+                    except Exception:
+                        pass
+                    if el.is_visible(timeout=1500):
+                        self.log(f"[INFO] Opening post dialog for {href}")
+                        el.click(timeout=5000)
+                        time.sleep(2.5)   # Wait for dialog/page to load
+                        break
         except Exception as e:
             self.log(f"[WARN] Could not click thumbnail for {href}: {e}")
             item.setdefault("caption", "")

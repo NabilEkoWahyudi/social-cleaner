@@ -560,27 +560,10 @@ class SocialCleanerApp(tk.Tk):
                                      "Please enter at least one keyword.")
                 return
 
-        filter_desc = {
-            "all":              "DELETE ALL items",
-            "date":             f"items posted BEFORE  {before_date.strftime('%Y-%m-%d') if before_date else '?'}",
-            "keyword":          f"items matching: {', '.join(keywords)}",
-            "keyword_and_date": f"items matching ({', '.join(keywords)})  AND  before "
-                                 f"{before_date.strftime('%Y-%m-%d') if before_date else '?'}",
-        }.get(mode, mode)
-
-        if not messagebox.askyesno(
-            "⚠  Confirm Deletion",
-            f"Platform : {PLATFORM_LABELS[platform]}\n"
-            f"Type     : {CONTENT_LABELS[content_type]}\n"
-            f"Filter   : {filter_desc}\n\n"
-            "This action CANNOT be undone.\n\nProceed?"
-        ):
-            return
-
         self._start_btn.config(state="disabled")
         self._stop_btn.config(state="normal")
         self._deleted_var.set("Deleted: 0")
-        self._status_var.set(f"Running: {PLATFORM_LABELS[platform]} {CONTENT_LABELS[content_type]}…")
+        self._status_var.set(f"Scanning: {PLATFORM_LABELS[platform]} {CONTENT_LABELS[content_type]}...")
 
         CleanerClass = get_cleaner_class(platform, content_type)
         self._active_cleaner = CleanerClass(
@@ -592,10 +575,58 @@ class SocialCleanerApp(tk.Tk):
             if msg == "DONE":
                 self.after(0, self._on_done)
 
+        def confirm_deletion(report: dict) -> bool:
+            """Pop up interactive confirmation dialog after Phase 1 (Scanning) completes."""
+            res_event = threading.Event()
+            res_val   = [False]
+
+            def _ask():
+                total   = report.get("total_scanned", 0)
+                targets = report.get("total_targets", 0)
+                skipped = report.get("total_skipped", 0)
+                m       = report.get("mode", "")
+
+                lines = [
+                    f"Platform : {PLATFORM_LABELS[platform]} ({CONTENT_LABELS[content_type]})",
+                    f"Total repost di akun       : {total} item",
+                    f"Target yang cocok dihapus : {targets} item",
+                    f"Repost yang dipertahankan  : {skipped} item",
+                    "",
+                ]
+
+                if m == "all":
+                    lines.append(f"Semua {total} repost di akun Anda akan dihapus.")
+                else:
+                    target_list = report.get("targets", [])
+                    if target_list:
+                        lines.append("Rincian Repost yang Cocok:")
+                        for itm in target_list[:6]:
+                            dt_str = itm.get("date_str", "")
+                            rel    = itm.get("rel_time", "")
+                            rsn    = itm.get("reason", "")
+                            lines.append(f" • {dt_str} ({rel}) [{rsn}]")
+                        if len(target_list) > 6:
+                            lines.append(f" • ... dan {len(target_list) - 6} item lainnya.")
+                    lines.append("")
+
+                lines.append(f"Lanjutkan untuk menghapus {targets} repost ini sekarang?")
+                lines.append("(Tindakan ini tidak dapat dibatalkan)")
+
+                res_val[0] = messagebox.askyesno(
+                    "🔍 Hasil Scanning Repost",
+                    "\n".join(lines)
+                )
+                res_event.set()
+
+            self.after(0, _ask)
+            res_event.wait()
+            return res_val[0]
+
         def run():
             self._active_cleaner.run(
                 mode=mode, keywords=keywords,
-                before_date=before_date, on_progress=on_progress
+                before_date=before_date, on_progress=on_progress,
+                confirm_fn=confirm_deletion
             )
 
         self._worker_thread = threading.Thread(target=run, daemon=True)
